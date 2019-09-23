@@ -1,0 +1,50 @@
+#include "trackfinderalgorithms.fcl"
+#include "calorimetry_dune35t.fcl"
+#include "dataprovider.fcl"
+
+BEGIN_PROLOG
+
+MichelImageDrawer: {
+
+	module_type: "MichelImageDrawer"
+
+	# Debug parameters
+	Debug: true
+
+	# Reco data product labels
+	CalorimetryTag: "pandoracalo"
+	TrackTag:       "pandoraTrack"
+	ShowerTag:      "pandoraShower"
+	PFParticleTag:  "pandora"
+	MCParticleTag:  "largeant"
+	NNetTag:        "emtrkmichelid:emtrkmichel"
+
+	# Event selection parameters
+	FidVolCut: 25.
+
+
+}
+
+
+MichelImageDrawerData: {
+
+	module_type: "MichelImageDrawerData"
+
+	# Debug parameters
+	Debug: true
+
+	# Reco data product labels
+	CalorimetryTag: "pandoracalo"
+	TrackTag:       "pandoraTrack"
+	ShowerTag:      "pandoraShower"
+	PFParticleTag:  "pandora"
+	MCParticleTag:  "largeant"
+	NNetTag:        "emtrkmichelid:emtrkmichel"
+
+	# Event selection parameters
+	FidVolCut: 25.
+
+
+}
+
+END_PROLOG

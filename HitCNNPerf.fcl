@@ -1,0 +1,8 @@
+BEGIN_PROLOG
+
+proto_cnn_example:
+{
+   module_type:             "HitCNNPerf"
+}
+
+END_PROLOG

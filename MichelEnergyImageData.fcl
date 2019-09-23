@@ -1,0 +1,32 @@
+#include "trackfinderalgorithms.fcl"
+#include "calorimetry_pdune.fcl"
+#include "dataprovider.fcl"
+
+BEGIN_PROLOG
+
+MichelEnergyImageData: {
+
+	module_type: "MichelEnergyImageData"
+
+	# Debug parameters
+	Debug: true
+
+	CalorimetryTag: @local::pdune_sp_calorimetryalgmc
+
+	# Reco data product labels
+	TrackTag:       "pandoraTrack"
+	ShowerTag:      "pandoraShower"
+	PFParticleTag:  "pandora"
+	NNetTag:        "emtrkmichelid:emtrkmichel"
+	HitTag:         "hitpdune"
+	CaloTag:        "pandoracalo"
+
+	# Event selection parameters
+	FidVolCut: 25.
+
+	# Image details
+	NWireBins: 164
+
+}
+
+END_PROLOG
