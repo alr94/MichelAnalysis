@@ -321,7 +321,7 @@ void MichelAnalysis::MichelConeEnergy::analyze(art::Event const & event)
 			MichelAnalysis::AnalyseDaughterShowerHits(fDaughter, fHit, duneUtils,
 			                                          daughterShowerHits, 
 			                                          hitcnnscores, fPrimary.T0,
-			                                          fCaloAlg, fHitTree);
+			                                          fCaloAlg, event, fHitTree);
 
 			// Update best daughter if applicable
 			if (fDaughter.FractionMichelHits > bestMichelFraction) 

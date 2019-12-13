@@ -363,7 +363,8 @@ void MichelAnalysis::MichelImageDrawer::analyze(art::Event const & event)
 			TH2D patchHist = MichelAnalysis::DrawMichelAsRawImage(daughterShowerHits, 
 			                                                      event, basename, 
 			                                                      tfs, fNWireBins,
-			                                                      duneUtils);
+			                                                      duneUtils,
+			                                                      "caldata");
 
 			if (patchHist.GetEntries() == 0) { continue; }
 

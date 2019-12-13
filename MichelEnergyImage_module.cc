@@ -37,9 +37,11 @@
 #include "dune/Protodune/Analysis/ProtoDUNEPFParticleUtils.h"
 
 // ROOT includes
+#include "TFile.h"
 #include "TTree.h"
 #include "TH2D.h"
 #include "TCanvas.h"
+#include "TSystem.h"
 
 // C++ includes 
 #include <iostream>
@@ -89,10 +91,6 @@ private:
 
 	// Image size etc
 	size_t fNWireBins;
-
-	// Drawing and name bookeping
-	TCanvas * fCanvas = new TCanvas("canv", "canv");
-	int nImagesDrawn {0};
 
 	// Event selection tunable parameters
 	double fFidVolCut;
@@ -148,19 +146,20 @@ void MichelAnalysis::MichelEnergyImage::analyze(art::Event const & event)
 
 	// Utilites
 	MichelAnalysis::ProtoDUNEUtils pdUtils = MichelAnalysis::GetProtoDUNEUtils();
-	MichelAnalysis::DUNEUtils duneUtils = MichelAnalysis::GetDUNEUtils();
+	MichelAnalysis::DUNEUtils duneUtils    = MichelAnalysis::GetDUNEUtils();
 
 	// Reco data products
 	vh_vec_pfp_t pfparticles = event.getValidHandle<vec_pfp_t>(fPFParticleTag);
 	mva_hit_t hitcnnscores(event, fNNetTag);
-	art::Handle<std::vector<recob::Hit> > hitCollector;
+
+	art::Handle<std::vector<recob::Hit>> hitCollector;
 	vec_ptr_hit_t allHits;
 	if (event.getByLabel(fHitTag, hitCollector)) 
 	{
 		art::fill_ptr_vector(allHits, hitCollector);
 	}
-	//////////////////////////////////////////////////////////////////////////////
 
+	//////////////////////////////////////////////////////////////////////////////
 	// Loop over all pfparticles to find primary muons
 	for (auto const & pfparticle : * pfparticles) 
 	{
@@ -178,9 +177,19 @@ void MichelAnalysis::MichelEnergyImage::analyze(art::Event const & event)
 		                                     fTrackTag);
 		if (primarytrack == nullptr) { continue; }
 
+		std::vector<anab::T0> t0s = pdUtils.pfputil.GetPFParticleT0(pfparticle, 
+		                                                            event, 
+		                                                            fPFParticleTag);
+
 		// Get details of this primary track
 		fPrimary = MichelAnalysis::GetTrackData(primarytrack, pdUtils, event, 
 		                                        fTrackTag );
+		if (t0s.size() > 0) 
+		{
+			fPrimary.HasT0 = true;
+			fPrimary.T0    = t0s[0].Time() / duneUtils.detprop -> SamplingRate();
+		}
+		if (!fPrimary.HasT0) { continue; }
 
 		// Look for all daughter showers of this track 
 		const std::vector<const recob::Shower *> daughterShowers =
@@ -207,7 +216,7 @@ void MichelAnalysis::MichelEnergyImage::analyze(art::Event const & event)
 			MichelAnalysis::AnalyseDaughterShowerHits(fDaughter, fHit, duneUtils,
 			                                          daughterShowerHits, 
 			                                          hitcnnscores, fPrimary.T0,
-			                                          fCaloAlg);
+			                                          fCaloAlg, event);
 
 			// Update best daughter 
 			if (fDaughter.FractionMichelHits > bestMichelFraction) 
@@ -218,7 +227,6 @@ void MichelAnalysis::MichelEnergyImage::analyze(art::Event const & event)
 			}
 
 		}
-
 		if (bestShower == nullptr) { continue; }
 
 		// Get details of the best daughter
@@ -229,76 +237,38 @@ void MichelAnalysis::MichelEnergyImage::analyze(art::Event const & event)
 		size_t nColHits { 0 }, nMicColHits { 0 };
 		for (auto const & hit : showerHits)
 		{
-			if (hit->WireID().Plane != 2) { continue; }
+			if (hit -> WireID().Plane != 2) { continue; }
 			nColHits += 1;
+
 			const bool hitIsMichel = HitIsMichel(hit, duneUtils);
 			if (hitIsMichel) { nMicColHits += 1; }
 		}
-		if (nColHits < 5 || nMicColHits < 3) { continue; }
+		// FIXME if (nColHits < 5 || nMicColHits < 3) { continue; }
+		if (nColHits < 5) { continue; }
+
+		if (!MichelAnalysis::EventSelection(* primarytrack, * bestShower, 
+		                                    bestDaughter)) 
+		{ continue; }
 
 		// Cut to select only true michel electron images
 		const simb::MCParticle * mcParticle = 
 		  MichelAnalysis::HitsToMcParticle(showerHits, duneUtils);
-		bool hitsAreMichel = MichelAnalysis::MCPIsMichel(mcParticle);
-		if (!hitsAreMichel) { continue; }
 
-		// TODO: Improve image normalisation
-		// Calculate normalisation factor
-		// Using calos make the 60cm 10 bin averaged dQ/dx constant
-		size_t nHitsUsed { 0  };
-		float avgDQDX    { 0. };
-		std::vector<anab::Calorimetry> calos = 
-		  pdUtils.trackutil.GetRecoTrackCalorimetry(* primarytrack, event, 
-		                                              fTrackTag, fCaloTag);
-		for (size_t itcal = 0; itcal < calos.size(); itcal++) 
-		{
-			if (calos[itcal].PlaneID().Plane != 2) { continue; }
+		// const float norm = GetADCNorm(pdUtils, primarytrack, event, fTrackTag, 
+		//                               fCaloTag);
+		// if (norm < 0.33f || norm > 3.f) { continue; }
 
-			auto rr = calos[itcal].ResidualRange();
-
-			std::vector<size_t> idx(rr.size());
-			std::iota(idx.begin(), idx.end(), 0);
-			std::sort(idx.begin(), idx.end(), 
-			          [&rr](size_t i1, size_t i2) { return rr[i1] < rr[i2]; });
-
-			for (auto iHit : idx)  
-			{
-				if (nHitsUsed >= 10) { break; }
-				if (rr[iHit] > 60.f)
-				{
-					avgDQDX   += (calos[itcal].dQdx())[iHit];
-					nHitsUsed += 1;
-				}
-			}
-		}
-		if (nHitsUsed < 10) { continue; }
-
-		// Normalise to 300 avg dqdx ---> don't need to be too accurate but this is
-		// a reasonable value
-		avgDQDX /= static_cast<float>(nHitsUsed);
-		float norm { 300.f / avgDQDX };
-		if (norm < 0.33f || norm > 3.f) { continue; }
-
-		std::cout << "Making image..." << std::flush;
+		std::cout << "Making image..." << std::endl;
 
 		std::ostringstream buffer;
 		buffer << "event_" << event.id().event() << "_primary" << pfparticle.Self()
-		       << "_energy" << mcParticle->E() * 1000.;
+		       << "_energy" << mcParticle -> E() * 1000.;
 		std::string basename = buffer.str();
 
-		std::vector<TH2D> trainingData = 
-		  DrawMichelTrainingData(showerHits, allHits, * pfparticles, fPFParticleTag,
-		                         hitcnnscores, fPrimary.T0, * mcParticle, fCaloAlg, 
-		                         event, basename, tfs, fNWireBins, norm, pdUtils, 
-		                         duneUtils);
-
-		if (trainingData.size() == 0)          { continue; }
-		if (trainingData[0].GetEntries() == 0) { continue; }
-
-		TH2D rawImage = DrawMichelAsRawImage(showerHits, event, basename, tfs, 
-		                                     fNWireBins, duneUtils);
-
-		std::cout << "\n";
+		DrawMichelTrainingData(showerHits, allHits, * pfparticles, fPFParticleTag,
+		                       hitcnnscores, fPrimary.T0, * mcParticle, fCaloAlg, 
+		                       event, basename, tfs, fNWireBins, 1., pdUtils, 
+		                       duneUtils);
 
 	}
 

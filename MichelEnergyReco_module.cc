@@ -188,7 +188,7 @@ void MichelAnalysis::MichelEnergyReco::analyze(art::Event const & event)
 
 			MichelAnalysis::AnalyseDaughterShowerHits(fDaughter, fHit, duneUtils,
 			                                          daughterHits, hitcnnscores,
-			                                          fPrimary.T0, fCaloAlg);
+			                                          fPrimary.T0, fCaloAlg, event);
 
 			if (fDaughter.FractionMichelHits > bestMichelFraction)
 			{

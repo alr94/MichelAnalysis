@@ -54,6 +54,8 @@ using vh_vec_mcp_t   = art::ValidHandle<std::vector<simb::MCParticle>>;
 using vec_mcp_t      = std::vector<simb::MCParticle>;
 using mcp_t          = simb::MCParticle;
 
+using vec_ptr_sp_t  = std::vector<art::Ptr<recob::SpacePoint>>;
+
 using vec_ptr_hit_t = std::vector<art::Ptr<recob::Hit>>;
 using mva_hit_t     = anab::MVAReader<recob::Hit, 4>;
 
@@ -100,6 +102,10 @@ namespace MichelAnalysis
 		float Integral;
 		float Energy;
 
+		double X;
+		double Y;
+		double Z;
+
 		unsigned int CNNIndex_Michel;
 		unsigned int CNNIndex_EM;
 
@@ -118,11 +124,27 @@ namespace MichelAnalysis
 	                   double t0,
 	                   const calo::CalorimetryAlg & caloAlg,
 	                   const DUNEUtils & duneUtils,
+	                   const art::Event & event,
+	                   const mva_hit_t & hitcnnscores);
+
+	HitData GetHitData(const art::Ptr<recob::Hit> hit, 
+	                   double t0,
+	                   const calo::CalorimetryAlg & caloAlg,
+	                   const MichelAnalysis::DUNEUtils & duneUtils,
+	                   const art::Event & event,
+	                   const vec_ptr_sp_t spacePoint,
 	                   const mva_hit_t & hitcnnscores);
 
 	double HitToEnergy(art::Ptr<recob::Hit> hit, 
 	                   double t0, 
 	                   const calo::CalorimetryAlg & caloAlg,
+	                   const DUNEUtils & duneUtils); 
+
+	double HitToEnergy(art::Ptr<recob::Hit> hit, 
+	                   double X, double Y, double Z,
+	                   double t0, 
+	                   const calo::CalorimetryAlg & caloAlg,
+	                   const art::Event & event,
 	                   const DUNEUtils & duneUtils); 
 
 	bool HitsAreMichel(std::vector<art::Ptr<recob::Hit>> michelHits, 
@@ -196,10 +218,10 @@ namespace MichelAnalysis
 		float AvgMichelScore;
 		float AvgEMScore;
 
-		float              DistanceToPrimary;
-		float              DistanceToPrimaryX;
-		float              DistanceToPrimaryY;
-		float              DistanceToPrimaryZ;
+		float DistanceToPrimary;
+		float DistanceToPrimaryX;
+		float DistanceToPrimaryY;
+		float DistanceToPrimaryZ;
 
 	};
 
@@ -225,6 +247,7 @@ namespace MichelAnalysis
 	                               const mva_hit_t & hitcnnscores, 
 	                               double t0,
 	                               const calo::CalorimetryAlg & caloAlg,
+	                               const art::Event & event,
 	                               TTree * hitTree); 
 
 	void AnalyseDaughterShowerHits(DaughterData & daughterData, 
@@ -233,7 +256,8 @@ namespace MichelAnalysis
 	                               const vec_ptr_hit_t & daughterShowerHits,
 	                               const mva_hit_t & hitcnnscores, 
 	                               double t0,
-	                               const calo::CalorimetryAlg & caloAlg); 
+	                               const calo::CalorimetryAlg & caloAlg,
+	                               const art::Event & event); 
 
 	//////////////////////////////////////////////////////////////////////////////
 	// Data obtainers
@@ -344,6 +368,12 @@ namespace MichelAnalysis
 	// Plotting Functions
 	//////////////////////////////////////////////////////////////////////////////
 
+	const float GetADCNorm(const ProtoDUNEUtils & pdUtils, 
+	                       const recob::Track * track,
+	                       const art::Event & event,
+	                       const std::string trackLabel,
+	                       const std::string caloLabel);
+
 	TH2D DrawPatchAsHist(const std::vector<std::vector<float>> & patch, 
 	                     const std::string basename, 
 	                     art::ServiceHandle<art::TFileService> tfs);
@@ -353,7 +383,8 @@ namespace MichelAnalysis
 	                          const std::string basename, 
 	                          art::ServiceHandle<art::TFileService> tfs, 
 	                          const size_t nWireBins,
-	                          const DUNEUtils & duneUtils);
+	                          const DUNEUtils & duneUtils,
+	                          const std::string wireLabel);
 
 	std::vector<TH2D> DrawMichelTrainingData(
 	  const vec_ptr_hit_t & daughterHits,
@@ -394,7 +425,7 @@ namespace MichelAnalysis
 	  const MichelAnalysis::ProtoDUNEUtils & pdUtils,
 	  const MichelAnalysis::DUNEUtils & duneUtils);
 
-std::vector<TH2D> DrawMichelTrainingData(
+void DrawMichelTrainingData(
        const vec_ptr_hit_t & daughterHits,
        const vec_ptr_hit_t & allHits,
        const vec_pfp_t & pfparticles,

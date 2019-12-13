@@ -165,12 +165,12 @@ void MichelAnalysis::MichelEfficiency::InitialiseHitTree(
        const art::ServiceHandle<art::TFileService> & tfs)
 {
 
-	fHitTree = tfs->make<TTree>("hit", "Hit info");
+	fHitTree = tfs -> make<TTree>("hit", "Hit info");
 
-	fHitTree->Branch("PeakTime",        & fHit.PeakTime);
-	fHitTree->Branch("Integral",        & fHit.Integral);
-	fHitTree->Branch("CNNScore_Michel", & fHit.CNNScore_Michel);
-	fHitTree->Branch("CNNScore_EM",     & fHit.CNNScore_EM);
+	fHitTree -> Branch("PeakTime",        & fHit.PeakTime);
+	fHitTree -> Branch("Integral",        & fHit.Integral);
+	fHitTree -> Branch("CNNScore_Michel", & fHit.CNNScore_Michel);
+	fHitTree -> Branch("CNNScore_EM",     & fHit.CNNScore_EM);
 
 }
 
@@ -179,32 +179,21 @@ void MichelAnalysis::MichelEfficiency::InitialiseDaughterTree(
        const art::ServiceHandle<art::TFileService> & tfs)
 {
 
-	fDaughterTree = tfs->make<TTree>("daughter", "daughter info");
+	fDaughterTree = tfs -> make<TTree>("daughter", "daughter info");
 
-	fDaughterTree->Branch(
-	 "NHits",               & fDaughter.NHits);
-	fDaughterTree->Branch(
-	  "NMichelHits",        & fDaughter.NMichelHits);
-	fDaughterTree->Branch(
-	  "FractionMichelHits", & fDaughter.FractionMichelHits);
+	fDaughterTree -> Branch("NHits",              & fDaughter.NHits);
+	fDaughterTree -> Branch("NMichelHits",        & fDaughter.NMichelHits);
+	fDaughterTree -> Branch("FractionMichelHits", & fDaughter.FractionMichelHits);
 
-	fDaughterTree->Branch(
-	  "MichelScores",       & fDaughter.MichelScores);
-	fDaughterTree->Branch(
-	  "EMScores",           & fDaughter.EMScores);
-	fDaughterTree->Branch(
-	  "Integrals",          & fDaughter.Integrals);
-	fDaughterTree->Branch(
-	  "PeakTimes",          & fDaughter.PeakTimes);
+	fDaughterTree -> Branch("MichelScores",       & fDaughter.MichelScores);
+	fDaughterTree -> Branch("EMScores",           & fDaughter.EMScores);
+	fDaughterTree -> Branch("Integrals",          & fDaughter.Integrals);
+	fDaughterTree -> Branch("PeakTimes",          & fDaughter.PeakTimes);
 
-	fDaughterTree->Branch(
-	  "DistanceToPrimary",  & fDaughter.DistanceToPrimary);
-	fDaughterTree->Branch(
-	  "DistanceToPrimaryX", & fDaughter.DistanceToPrimaryX);
-	fDaughterTree->Branch(
-	  "DistanceToPrimaryY", & fDaughter.DistanceToPrimaryY);
-	fDaughterTree->Branch(
-	  "DistanceToPrimaryZ", & fDaughter.DistanceToPrimaryZ);
+	fDaughterTree -> Branch("DistanceToPrimary",  & fDaughter.DistanceToPrimary);
+	fDaughterTree -> Branch("DistanceToPrimaryX", & fDaughter.DistanceToPrimaryX);
+	fDaughterTree -> Branch("DistanceToPrimaryY", & fDaughter.DistanceToPrimaryY);
+	fDaughterTree -> Branch("DistanceToPrimaryZ", & fDaughter.DistanceToPrimaryZ);
 
 }
 
@@ -213,57 +202,29 @@ void MichelAnalysis::MichelEfficiency::InitialiseMichelEventTree(
        const art::ServiceHandle<art::TFileService> & tfs)
 {
 
-	fMichelEventTree = tfs->make<TTree>("michelevent", "Michel event info");
+	fMichelEventTree = tfs -> make<TTree>("michelevent", "Michel event info");
 
-	fMichelEventTree->Branch(
-	  "TrackID",                    & fMichelEvent.Primary.ID);
-
-	fMichelEventTree->Branch(
-	  "TrackIsMuonDecaying",        & fMichelEvent.Primary.IsMuonDecaying);
-
-	fMichelEventTree->Branch(
-	  "TrackVertexX",               & fMichelEvent.Primary.VertexX);
-	fMichelEventTree->Branch(
-	  "TrackVertexY",               & fMichelEvent.Primary.VertexY);
-	fMichelEventTree->Branch(
-	  "TrackVertexZ",               & fMichelEvent.Primary.VertexZ);
-
-	fMichelEventTree->Branch(
-	  "TrackEndX",                  & fMichelEvent.Primary.EndX);
-	fMichelEventTree->Branch(
-	  "TrackEndY",                  & fMichelEvent.Primary.EndY);
-	fMichelEventTree->Branch(
-	  "TrackEndZ",                  & fMichelEvent.Primary.EndZ);
-
-	fMichelEventTree->Branch(
-	  "TrackHasT0",                 & fMichelEvent.Primary.HasT0);
-	fMichelEventTree->Branch(
-	  "TrackT0",                    & fMichelEvent.Primary.T0);
-
-	fMichelEventTree->Branch(
-	  "DaughterNHits",              & fMichelEvent.Daughter.NHits);
-	fMichelEventTree->Branch(
-	  "DaughterNMichelHits",        & fMichelEvent.Daughter.NMichelHits);
-	fMichelEventTree->Branch(
-	  "DaughterFractionMichelHits", & fMichelEvent.Daughter.FractionMichelHits);
-
-	fMichelEventTree->Branch(
-	  "DaughterMichelScores",       & fMichelEvent.Daughter.MichelScores);
-	fMichelEventTree->Branch(
-	  "DaughterEMScores",           & fMichelEvent.Daughter.EMScores);
-	fMichelEventTree->Branch(
-	  "DaughterIntegrals",          & fMichelEvent.Daughter.Integrals);
-	fMichelEventTree->Branch(
-	  "DaughterPeakTimes",          & fMichelEvent.Daughter.PeakTimes);
-
-	fMichelEventTree->Branch(
-	  "DaughterDistanceToPrimary",  & fMichelEvent.Daughter.DistanceToPrimary);
-	fMichelEventTree->Branch(
-	  "DaughterDistanceToPrimaryX", & fMichelEvent.Daughter.DistanceToPrimaryX);
-	fMichelEventTree->Branch(
-	  "DaughterDistanceToPrimaryY", & fMichelEvent.Daughter.DistanceToPrimaryY);
-	fMichelEventTree->Branch(
-	  "DaughterDistanceToPrimaryZ", & fMichelEvent.Daughter.DistanceToPrimaryZ);
+	fMichelEventTree -> Branch("TrackID",                    & fMichelEvent.Primary.ID);
+	fMichelEventTree -> Branch("TrackIsMuonDecaying",        & fMichelEvent.Primary.IsMuonDecaying);
+	fMichelEventTree -> Branch("TrackVertexX",               & fMichelEvent.Primary.VertexX);
+	fMichelEventTree -> Branch("TrackVertexY",               & fMichelEvent.Primary.VertexY);
+	fMichelEventTree -> Branch("TrackVertexZ",               & fMichelEvent.Primary.VertexZ);
+	fMichelEventTree -> Branch("TrackEndX",                  & fMichelEvent.Primary.EndX);
+	fMichelEventTree -> Branch("TrackEndY",                  & fMichelEvent.Primary.EndY);
+	fMichelEventTree -> Branch("TrackEndZ",                  & fMichelEvent.Primary.EndZ);
+	fMichelEventTree -> Branch("TrackHasT0",                 & fMichelEvent.Primary.HasT0);
+	fMichelEventTree -> Branch("TrackT0",                    & fMichelEvent.Primary.T0);
+	fMichelEventTree -> Branch("DaughterNHits",              & fMichelEvent.Daughter.NHits);
+	fMichelEventTree -> Branch("DaughterNMichelHits",        & fMichelEvent.Daughter.NMichelHits);
+	fMichelEventTree -> Branch("DaughterFractionMichelHits", & fMichelEvent.Daughter.FractionMichelHits);
+	fMichelEventTree -> Branch("DaughterMichelScores",       & fMichelEvent.Daughter.MichelScores);
+	fMichelEventTree -> Branch("DaughterEMScores",           & fMichelEvent.Daughter.EMScores);
+	fMichelEventTree -> Branch("DaughterIntegrals",          & fMichelEvent.Daughter.Integrals);
+	fMichelEventTree -> Branch("DaughterPeakTimes",          & fMichelEvent.Daughter.PeakTimes);
+	fMichelEventTree -> Branch("DaughterDistanceToPrimary",  & fMichelEvent.Daughter.DistanceToPrimary);
+	fMichelEventTree -> Branch("DaughterDistanceToPrimaryX", & fMichelEvent.Daughter.DistanceToPrimaryX);
+	fMichelEventTree -> Branch("DaughterDistanceToPrimaryY", & fMichelEvent.Daughter.DistanceToPrimaryY);
+	fMichelEventTree -> Branch("DaughterDistanceToPrimaryZ", & fMichelEvent.Daughter.DistanceToPrimaryZ);
 
 }
 
@@ -272,16 +233,16 @@ void MichelAnalysis::MichelEfficiency::InitialiseEventSelectionTree(
        const art::ServiceHandle<art::TFileService> & tfs)
 {
 
-	fEventSelectionTree = tfs->make<TTree>("eventselection", 
+	fEventSelectionTree = tfs -> make<TTree>("eventselection", 
 	                                         "event selection info");
 
-	fEventSelectionTree->Branch(
+	fEventSelectionTree -> Branch(
 	  "NTrue",                & fEventSelection.NTrue);
-	fEventSelectionTree->Branch(
+	fEventSelectionTree -> Branch(
 	  "NSelected",            & fEventSelection.NSelected);
-	fEventSelectionTree->Branch(
+	fEventSelectionTree -> Branch(
 	  "NCorrectlySelected",   & fEventSelection.NCorrectlySelected);
-	fEventSelectionTree->Branch(
+	fEventSelectionTree -> Branch(
 	  "NIncorrectlySelected", & fEventSelection.NIncorrectlySelected);
 
 }
@@ -356,7 +317,7 @@ void MichelAnalysis::MichelEfficiency::analyze(art::Event const & event)
 			MichelAnalysis::AnalyseDaughterShowerHits(fDaughter, fHit, duneUtils,
 			                                          daughterShowerHits, 
 			                                          hitcnnscores, fPrimary.T0,
-			                                          fCaloAlg, fHitTree);
+			                                          fCaloAlg, event, fHitTree);
 
 			// Update best daughter if applicable
 			if (fDaughter.FractionMichelHits > bestMichelFraction) 
@@ -371,7 +332,7 @@ void MichelAnalysis::MichelEfficiency::analyze(art::Event const & event)
 		if (bestShower == nullptr) { continue; }
 
 		fDaughter = bestDaughter;
-		fDaughterTree->Fill();
+		fDaughterTree -> Fill();
 
 		// Now take our best daughter and do the event selection based on the hits
 		const vec_ptr_hit_t daughterShowerHits = 
@@ -386,11 +347,11 @@ void MichelAnalysis::MichelEfficiency::analyze(art::Event const & event)
 		// Make a michel event object that has details of the daughter and the 
 		// primary.
 		fMichelEvent = { fPrimary, bestDaughter };
-		fMichelEventTree->Fill();
+		fMichelEventTree -> Fill();
 
 	}
 
-	fEventSelectionTree->Fill();
+	fEventSelectionTree -> Fill();
 
 }
 

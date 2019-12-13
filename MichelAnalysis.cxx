@@ -36,6 +36,7 @@
 
 // ROOT includes
 #include "TTree.h"
+#include "TFile.h"
 #include "TH2D.h"
 
 // C++ includes 
@@ -105,9 +106,14 @@ MichelAnalysis::HitData MichelAnalysis::GetHitData(
 
 	MichelAnalysis::HitData hitData;
 
-	hitData.PeakTime          = hit->PeakTime();
-	hitData.Integral          = hit->Integral();
+	hitData.PeakTime          = hit -> PeakTime();
+	hitData.Integral          = hit -> Integral();
+
 	hitData.Energy            = 0; 
+
+	hitData.X                 = 0.;
+	hitData.Y                 = 0.;
+	hitData.Z                 = 0.;
 
 	hitData.CNNIndex_Michel   = hitcnnscores.getIndex("michel");
 	hitData.CNNIndex_EM       = hitcnnscores.getIndex("em");
@@ -126,13 +132,48 @@ MichelAnalysis::HitData MichelAnalysis::GetHitData(
                           double t0,
                           const calo::CalorimetryAlg & caloAlg,
                           const MichelAnalysis::DUNEUtils & duneUtils,
+                          const art::Event & event,
                           const mva_hit_t & hitcnnscores)
 {
 
 	MichelAnalysis::HitData hitData = 
 	  MichelAnalysis::GetHitData(hit, hitcnnscores);
 
-	hitData.Energy = MichelAnalysis::HitToEnergy(hit, t0, caloAlg, duneUtils); 
+
+	hitData.Energy = MichelAnalysis::HitToEnergy(hit, 0., 0., 0., t0, caloAlg, event,
+	                                             duneUtils); 
+
+	return hitData;
+
+}
+
+MichelAnalysis::HitData MichelAnalysis::GetHitData(
+                          const art::Ptr<recob::Hit> hit, 
+                          double t0,
+                          const calo::CalorimetryAlg & caloAlg,
+                          const MichelAnalysis::DUNEUtils & duneUtils,
+                          const art::Event & event,
+                          const vec_ptr_sp_t spacePoint,
+                          const mva_hit_t & hitcnnscores)
+{
+
+	MichelAnalysis::HitData hitData = 
+	  MichelAnalysis::GetHitData(hit, hitcnnscores);
+
+	hitData.X = duneUtils.detprop -> ConvertTicksToX(hit -> PeakTime() - t0, 
+	                                                 hit -> WireID().Plane, 
+	                                                 hit -> WireID().TPC, 
+	                                                 hit -> WireID().Cryostat);
+
+	if (!spacePoint.empty())
+	{
+		hitData.Y = spacePoint[0] -> XYZ()[1];
+		hitData.Z = spacePoint[0] -> XYZ()[2];
+	}
+
+	hitData.Energy = MichelAnalysis::HitToEnergy(hit, hitData.X , hitData.Y, 
+	                                             hitData.Z,  t0, caloAlg, event,
+	                                             duneUtils); 
 
 	return hitData;
 
@@ -146,7 +187,7 @@ const simb::MCParticle * MichelAnalysis::HitsToMcParticle(
 	std::unordered_map<int, double> trackIDE;
 	for (auto hit : hits)
 	{
-		auto const & ides = duneUtils.bt->HitToTrackIDEs(hit);
+		auto const & ides = duneUtils.bt -> HitToTrackIDEs(hit);
 		for (auto const & ide : ides) { trackIDE[ide.trackID] += ide.energy; }
 	}
 
@@ -163,7 +204,7 @@ const simb::MCParticle * MichelAnalysis::HitsToMcParticle(
 	if ((maxE > 0) && (totE > 0))
 	{
 		if (bestID < 0) { bestID = - bestID; }
-		mcParticle = duneUtils.pis->TrackIdToParticle_P(bestID);
+		mcParticle = duneUtils.pis -> TrackIdToParticle_P(bestID);
 	}
 
 	return mcParticle;
@@ -190,24 +231,175 @@ double MichelAnalysis::HitToEnergy(art::Ptr<recob::Hit> hit,
 
 	constexpr int collectionView {2};
 
-	if (hit->View() != collectionView) { return 0.; }
+	if (hit -> View() != collectionView) { return 0.; }
 
 	double energy { 0. };
 
-	double lifetime_correction = caloAlg.LifetimeCorrection(hit->PeakTime(), t0);
-
-	double lifetime_corrected_integral { hit->Integral() * lifetime_correction };
-
-	double electrons { caloAlg.ElectronsFromADCArea(lifetime_corrected_integral,
-	                                                collectionView) }; 
-
-	double electronsToMeV { 1000. / duneUtils.larg4->GeVToElectrons() };
+	const double lifetime_correction 
+	  { caloAlg.LifetimeCorrection(hit -> PeakTime(), t0) };
+	const double lifetime_corr_integral 
+	  { hit -> Integral() * lifetime_correction };
+	const double electrons 
+	  { caloAlg.ElectronsFromADCArea(lifetime_corr_integral, collectionView) }; 
+	const double electronsToMeV 
+	  { 1000. / duneUtils.larg4 -> GeVToElectrons() };
 
 	energy = electrons * electronsToMeV;
 
-	double recombination_factor = 0.69; // TODO: This parameter needs more thought
+	// TODO: This parameter needs more thought
+	const double recombination_factor { 0.69 }; 
 
 	energy /= recombination_factor;
+
+	return energy;
+
+}
+
+double MichelAnalysis::HitToEnergy(const art::Ptr<recob::Hit> hit, 
+                                   double X, double Y, double Z,
+                                   double t0, 
+                                   const calo::CalorimetryAlg & caloAlg,
+                                   const art::Event & event,
+                                   const MichelAnalysis::DUNEUtils & duneUtils) 
+{
+
+	constexpr int collectionView { 2 };
+	if (hit -> View() != collectionView) { return 0.; }
+
+	bool   isCalibratedRun { false };
+	double calib_const     { 1. };
+	double norm_factor     { 0. };
+	double X_factor        { 1. }; // Based on method from Ajib, convolved x corrections
+	double YZ_factor       { 1. }; // Based on method from Ajib, convolved yz corrections
+	double recomb_factor   { 0.69 }; // from average dq/dx dist for michels in LAr
+	// double electronsToMeV  { 1000. / duneUtils.larg4 -> GeVToElectrons() };
+
+	// Calibration values from Ajib for valid runs
+	if (event.isRealData())
+	{
+		if (event.run() == 5387)
+		{ 
+			isCalibratedRun = true; calib_const = 5.23e-3; norm_factor = 0.9946; 
+
+			TFile * xfile = new TFile("./Xcalo_r5387.root");
+			TH1F * x_corr = (TH1F *) xfile -> Get("dqdx_X_correction_hist_2");
+			X_factor = x_corr -> GetBinContent(x_corr -> FindBin(X));
+			delete x_corr;
+
+			TFile * yzfile = new TFile("./YZcalo_r5387.root");
+			if (X < 0)
+			{
+				TH2F * yz_neg = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_negativeX_hist_2");
+				YZ_factor = yz_neg -> GetBinContent(yz_neg -> FindBin(Z, Y));
+				delete yz_neg;
+			}
+			else if (X >= 0)
+			{
+				TH2F * yz_pos = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_positiveX_hist_2");
+				YZ_factor = yz_pos -> GetBinContent(yz_pos -> FindBin(Z, Y));
+				delete yz_pos;
+			}
+			xfile -> Close();
+			yzfile -> Close();
+			delete xfile;
+			delete yzfile;
+		}
+		else if (event.run() == 5770)
+		{ 
+			isCalibratedRun = true; calib_const = 5.59e-3; norm_factor = 1.1334; 
+			TFile * xfile = new TFile("./Xcalo_r5770.root");
+			TH1F * x_corr = (TH1F *) xfile -> Get("dqdx_X_correction_hist_2");
+			X_factor = x_corr -> GetBinContent(x_corr -> FindBin(X));
+			delete x_corr;
+
+			TFile * yzfile = new TFile("./YZcalo_r5770.root");
+			if (X < 0)
+			{
+				TH2F * yz_neg = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_negativeX_hist_2");
+				YZ_factor = yz_neg -> GetBinContent(yz_neg -> FindBin(Z, Y));
+				delete yz_neg;
+			}
+			else if (X >= 0)
+			{
+				TH2F * yz_pos = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_positiveX_hist_2");
+				YZ_factor = yz_pos -> GetBinContent(yz_pos -> FindBin(Z, Y));
+				delete yz_pos;
+			}
+			xfile -> Close();
+			yzfile -> Close();
+			delete xfile;
+			delete yzfile;
+		}
+		else if (event.run() == 5809)
+		{ 
+			isCalibratedRun = true; calib_const = 5.58e-3; norm_factor = 1.0469; 
+
+			TFile * xfile = new TFile("./Xcalo_r5809.root");
+			TH1F * x_corr = (TH1F *) xfile -> Get("dqdx_X_correction_hist_2");
+			X_factor = x_corr -> GetBinContent(x_corr -> FindBin(X));
+			delete x_corr;
+
+			TFile * yzfile = new TFile("./YZcalo_r5809.root");
+			if (X < 0)
+			{
+				TH2F * yz_neg = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_negativeX_hist_2");
+				YZ_factor = yz_neg -> GetBinContent(yz_neg -> FindBin(Z, Y));
+				delete yz_neg;
+			}
+			else if (X >= 0)
+			{
+				TH2F * yz_pos = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_positiveX_hist_2");
+				YZ_factor = yz_pos -> GetBinContent(yz_pos -> FindBin(Z, Y));
+				delete yz_pos;
+			}
+			xfile -> Close();
+			yzfile -> Close();
+			delete xfile;
+			delete yzfile;
+		}
+	}
+	else
+	{ 
+
+		isCalibratedRun = true; calib_const = 4.86e-3; norm_factor = 0.9947; 
+
+		TFile * xfile = new TFile("./Xcalo_sce.root");
+		TH1F * x_corr = (TH1F *) xfile -> Get("dqdx_X_correction_hist_2");
+		X_factor = x_corr -> GetBinContent(x_corr -> FindBin(X));
+		delete x_corr;
+
+		TFile * yzfile = new TFile("./YZcalo_sce.root");
+		if (X < 0)
+		{
+			TH2F * yz_neg = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_negativeX_hist_2");
+			YZ_factor = yz_neg -> GetBinContent(yz_neg -> FindBin(Z, Y));
+			delete yz_neg;
+		}
+		else if (X >= 0)
+		{
+			TH2F * yz_pos = (TH2F *) yzfile -> Get("correction_dqdx_ZvsY_positiveX_hist_2");
+			YZ_factor = yz_pos -> GetBinContent(yz_pos -> FindBin(Z, Y));
+			delete yz_pos;
+		}
+
+		xfile -> Close();
+		yzfile -> Close();
+		delete xfile;
+		delete yzfile;
+
+	}
+
+	if (!isCalibratedRun) { return 0.; }
+
+	//double energy { caloAlg.ElectronsFromADCArea(hit -> Integral(), collectionView) };
+	// energy *= electronsToMeV;
+	double energy { hit -> Integral() };
+	energy *= norm_factor;
+	energy *= 23.6e-6;
+	energy /= calib_const;
+	energy *= X_factor;
+	energy *= YZ_factor;
+	energy /= recomb_factor;
 
 	return energy;
 
@@ -219,7 +411,7 @@ bool MichelAnalysis::HitsAreMichel(std::vector<art::Ptr<recob::Hit>> michelHits,
 
 	std::unordered_map<int,double> trkIDE;
 	for (auto const & hit : michelHits) {
-		for (auto const & ide: duneUtils.bt->HitToTrackIDEs(hit)) {
+		for (auto const & ide: duneUtils.bt -> HitToTrackIDEs(hit)) {
 			trkIDE[ide.trackID] += ide.energy;
 		}
 	}
@@ -237,12 +429,12 @@ bool MichelAnalysis::HitsAreMichel(std::vector<art::Ptr<recob::Hit>> michelHits,
 		if (best_id < 0) {
 			best_id = -best_id;
 		}
-		mcParticle = duneUtils.pis->TrackIdToParticle_P(best_id);
+		mcParticle = duneUtils.pis -> TrackIdToParticle_P(best_id);
 	}
 
 	if (mcParticle != nullptr) {
-		return abs(mcParticle->PdgCode()) == 11 && (mcParticle->Process() == 
-			"Decay" || mcParticle->Process() == "muMinusCaptureAtRest"); 
+		return abs(mcParticle -> PdgCode()) == 11 && (mcParticle -> Process() == 
+			"Decay" || mcParticle -> Process() == "muMinusCaptureAtRest"); 
 	}
 	else { return false; }
 
@@ -254,7 +446,7 @@ double MichelAnalysis::HitToTrueEnergy(art::Ptr<recob::Hit> hit,
 
 	double trueE = 0.;
 
-	auto const & hitIDEs = duneUtils.bt->HitToAvgSimIDEs(hit);
+	auto const & hitIDEs = duneUtils.bt -> HitToAvgSimIDEs(hit);
 	for (auto const & hitIDE : hitIDEs) { trueE += hitIDE.energy; }
 
 	return trueE;
@@ -266,7 +458,7 @@ const simb::MCParticle * MichelAnalysis::HitToMCP(art::Ptr<recob::Hit> hit,
 {
 
 	std::unordered_map<int,double> trkIDE;
-	for (auto const & ide: duneUtils.bt->HitToTrackIDEs(hit)) {
+	for (auto const & ide: duneUtils.bt -> HitToTrackIDEs(hit)) {
 		trkIDE[ide.trackID] += ide.energy;
 	}
 
@@ -281,7 +473,7 @@ const simb::MCParticle * MichelAnalysis::HitToMCP(art::Ptr<recob::Hit> hit,
 	const simb::MCParticle * mcParticle = 0;
 	if (max_e > 0 && tot_e > 0) {
 		if (best_id < 0) { best_id = -best_id; }
-		mcParticle = duneUtils.pis->TrackIdToParticle_P(best_id);
+		mcParticle = duneUtils.pis -> TrackIdToParticle_P(best_id);
 	}
 
 	return mcParticle;
@@ -293,7 +485,7 @@ bool MichelAnalysis::HitIsMichel(art::Ptr<recob::Hit> hit,
 {
 
 	std::unordered_map<int,double> trkIDE;
-	for (auto const & ide: duneUtils.bt->HitToTrackIDEs(hit)) {
+	for (auto const & ide: duneUtils.bt -> HitToTrackIDEs(hit)) {
 		trkIDE[ide.trackID] += ide.energy;
 	}
 
@@ -308,12 +500,12 @@ bool MichelAnalysis::HitIsMichel(art::Ptr<recob::Hit> hit,
 	const simb::MCParticle * mcParticle = 0;
 	if (max_e > 0 && tot_e > 0) {
 		if (best_id < 0) { best_id = -best_id; }
-		mcParticle = duneUtils.pis->TrackIdToParticle_P(best_id);
+		mcParticle = duneUtils.pis -> TrackIdToParticle_P(best_id);
 	}
 
 	if (mcParticle != 0) {
-		return abs(mcParticle->PdgCode()) == 11 && (mcParticle->Process() == 
-			"Decay" || mcParticle->Process() == "muMinusCaptureAtRest"); 
+		return abs(mcParticle -> PdgCode()) == 11 && (mcParticle -> Process() == 
+			"Decay" || mcParticle -> Process() == "muMinusCaptureAtRest"); 
 	}
 	else { return false; }
 
@@ -346,22 +538,22 @@ MichelAnalysis::TrackData MichelAnalysis::GetTrackData(
 
 	MichelAnalysis::TrackData trackData;
 
-	trackData.ID      = track->ID();
+	trackData.ID      = track -> ID();
 
-	trackData.VertexX = track->Vertex().X();
-	trackData.VertexY = track->Vertex().Y();
-	trackData.VertexZ = track->Vertex().Z();
+	trackData.VertexX = track -> Vertex().X();
+	trackData.VertexY = track -> Vertex().Y();
+	trackData.VertexZ = track -> Vertex().Z();
 
-	trackData.EndX    = track->End().X();
-	trackData.EndY    = track->End().Y();
-	trackData.EndZ    = track->End().Z();
+	trackData.EndX    = track -> End().X();
+	trackData.EndY    = track -> End().Y();
+	trackData.EndZ    = track -> End().Z();
 
 	std::vector<anab::T0> t0s = pdUtils.trackutil.GetRecoTrackT0(* track, event, 
 	                                                             trackModule);
 
 	trackData.HasT0 = (t0s.size() > 0);
 	if (trackData.HasT0) { trackData.T0 = t0s[0].Time(); }
-	else                 { trackData.T0 = 0; }
+	else                 { trackData.T0 = 0.; }
 
 	return trackData;
 
@@ -390,6 +582,26 @@ bool MichelAnalysis::TrackIsDecayingMuon(
 MichelAnalysis::DaughterData MichelAnalysis::ResetDaughterData()
 {
 	MichelAnalysis::DaughterData daughterData;
+
+	daughterData.NHits              = 0;
+	daughterData.NMichelHits        = 0;
+	daughterData.FractionMichelHits = 0;
+
+	// Data for this daughter
+	daughterData.MichelScores = {};
+	daughterData.EMScores     = {};
+	daughterData.Integrals    = {};
+	daughterData.Energies     = {};
+	daughterData.PeakTimes    = {};
+
+	daughterData.AvgMichelScore = 0;
+	daughterData.AvgEMScore     = 0;
+
+	daughterData.DistanceToPrimary  = 0;
+	daughterData.DistanceToPrimaryX = 0;
+	daughterData.DistanceToPrimaryY = 0;
+	daughterData.DistanceToPrimaryZ = 0;
+
 	return daughterData;
 }
 
@@ -482,6 +694,7 @@ void MichelAnalysis::AnalyseDaughterShowerHits(
        const mva_hit_t & hitcnnscores, 
        double t0,
        const calo::CalorimetryAlg & caloAlg,
+       const art::Event & event,
        TTree * hitTree) 
 {
 
@@ -492,7 +705,7 @@ void MichelAnalysis::AnalyseDaughterShowerHits(
 	{
 
 		hitData = MichelAnalysis::GetHitData(daughterShowerHit, t0, caloAlg,
-		                                     duneUtils, hitcnnscores);
+		                                     duneUtils, event, hitcnnscores);
 
 		daughterData.MichelScores.push_back(hitData.CNNScore_Michel);
 		daughterData.EMScores.push_back(hitData.CNNScore_EM);
@@ -519,17 +732,18 @@ void MichelAnalysis::AnalyseDaughterShowerHits(
        const vec_ptr_hit_t & daughterShowerHits,
        const mva_hit_t & hitcnnscores, 
        double t0,
-       const calo::CalorimetryAlg & caloAlg) 
+       const calo::CalorimetryAlg & caloAlg,
+       const art::Event & event) 
 {
 
 	daughterData.NMichelHits  = 0;
 	daughterData.NHits        = daughterShowerHits.size();
 
-	for (auto const & daughterShowerHit : daughterShowerHits) 
+	for (auto const & daughterShowerHit : daughterShowerHits)
 	{
-
 		hitData = MichelAnalysis::GetHitData(daughterShowerHit, t0, caloAlg,
-		                                     duneUtils, hitcnnscores);
+		                                     duneUtils, event,
+		                                     hitcnnscores);
 
 		daughterData.MichelScores.push_back(hitData.CNNScore_Michel);
 		daughterData.EMScores.push_back(hitData.CNNScore_EM);
@@ -583,7 +797,7 @@ const vec_ptr_hit_t MichelAnalysis::GetRecoShowerHits(
 	int actualIndex = shower.ID();
 	if(shower.ID() < 0)
 	{
-		for(unsigned int s = 0; s < recoShowers->size(); ++s)
+		for(unsigned int s = 0; s < recoShowers -> size(); ++s)
 		{
 			const recob::Shower thisShower = (* recoShowers)[s];
 			if(fabs(thisShower.Length() - shower.Length()) < 1e-5)
@@ -651,8 +865,8 @@ void MichelAnalysis::GetWireDriftData(
        size_t cryo)
 {
 
-	size_t nWires   = duneUtils.geom->Nwires(plane, tpc, cryo);
-	size_t nDrifts  = duneUtils.detprop->NumberTimeSamples(); 
+	size_t nWires   = duneUtils.geom -> Nwires(plane, tpc, cryo);
+	size_t nDrifts  = duneUtils.detprop -> NumberTimeSamples(); 
 
 	MichelAnalysis::ResizeWireDriftData(data, nWires, nDrifts);
 
@@ -660,7 +874,7 @@ void MichelAnalysis::GetWireDriftData(
 	{
 		auto wireChannel = wire.Channel();
 		size_t wireIndex = 0; 
-		for (auto const & wireID : duneUtils.geom->ChannelToWire(wireChannel))
+		for (auto const & wireID : duneUtils.geom -> ChannelToWire(wireChannel))
 		{
 			if ((wireID.Plane == plane) && (wireID.TPC == tpc) && 
 			    (wireID.Cryostat == cryo))
@@ -801,7 +1015,7 @@ const vec_ptr_hit_t MichelAnalysis::GetPFParticleHits(
 	vec_ptr_hit_t pfpHits;
 	for(auto const & cluster : pfpClusters){
 
-		const vec_ptr_hit_t & clusterHits = findHits.at(cluster->ID());
+		const vec_ptr_hit_t & clusterHits = findHits.at(cluster -> ID());
 
 		pfpHits.reserve(pfpHits.size() + clusterHits.size());
 		pfpHits.insert(pfpHits.end(), 
@@ -823,7 +1037,7 @@ const vec_ptr_hit_t MichelAnalysis::GetPFParticleHits(
 	// vec_ptr_hit_t pfpHits;
 	// for(auto const & sp : spacePoints)
 	// {
-	// 	const vec_ptr_hit_t & spacePointHits = findHits.at(sp->ID());
+	// 	const vec_ptr_hit_t & spacePointHits = findHits.at(sp -> ID());
 	// 	
 	// 	pfpHits.reserve(pfpHits.size() + spacePointHits.size());
 	// 	pfpHits.insert(pfpHits.end(), 
@@ -945,20 +1159,20 @@ bool MichelAnalysis::InsideFidVol(const double position [3],
 
 	bool inside = false;
 
-	geo::TPCID idtpc = duneUtils.geom->FindTPCAtPosition(position);
+	geo::TPCID idtpc = duneUtils.geom -> FindTPCAtPosition(position);
 
-	if (duneUtils.geom->HasTPC(idtpc)) 
+	if (duneUtils.geom -> HasTPC(idtpc)) 
 	{
 
-		const geo::TPCGeo & tpcgeo = duneUtils.geom->GetElement(idtpc);
+		const geo::TPCGeo & tpcgeo = duneUtils.geom -> GetElement(idtpc);
 		double minx = tpcgeo.MinX(); double maxx = tpcgeo.MaxX();
 		double miny = tpcgeo.MinY(); double maxy = tpcgeo.MaxY();
 		double minz = tpcgeo.MinZ(); double maxz = tpcgeo.MaxZ();
 		
-		for (size_t cryo = 0; cryo < duneUtils.geom->Ncryostats(); cryo++) 
+		for (size_t cryo = 0; cryo < duneUtils.geom -> Ncryostats(); cryo++) 
 		{
 
-			const geo::CryostatGeo & cryostat = duneUtils.geom->Cryostat(cryo);
+			const geo::CryostatGeo & cryostat = duneUtils.geom -> Cryostat(cryo);
 
 			for (size_t tpc = 0; tpc < cryostat.NTPC(); tpc++) 
 			{
@@ -1188,6 +1402,50 @@ void MichelAnalysis::EventSelectionTests(
 // Plotting Functions
 //////////////////////////////////////////////////////////////////////////////
 
+const float MichelAnalysis::GetADCNorm(
+       const MichelAnalysis::ProtoDUNEUtils & pdUtils,
+       const recob::Track * track,
+       const art::Event & event,
+       const std::string trackLabel,
+       const std::string caloLabel)
+{
+
+	size_t nHitsUsed { 0 };
+	float avgDQDX    { 0. };
+	std::vector<anab::Calorimetry> calos = 
+	  pdUtils.trackutil.GetRecoTrackCalorimetry(* track, event, trackLabel, 
+	                                            caloLabel);
+
+	for (size_t itcal = 0; itcal < calos.size(); itcal++) 
+	{
+		if (calos[itcal].PlaneID().Plane != 2) { continue; }
+
+		auto rr = calos[itcal].ResidualRange();
+
+		std::vector<size_t> idx(rr.size());
+		std::iota(idx.begin(), idx.end(), 0);
+		std::sort(idx.begin(), idx.end(), 
+		          [&rr](size_t i1, size_t i2) { return rr[i1] < rr[i2]; });
+
+		for (auto iHit : idx)  
+		{
+			if (nHitsUsed >= 10) { break; }
+			if (rr[iHit] > 60.f)
+			{
+				avgDQDX   += (calos[itcal].dQdx())[iHit];
+				nHitsUsed += 1;
+			}
+		}
+	}
+	if (nHitsUsed < 10) { return 99.f; }
+
+	// Normalise to 300 avg dqdx ---> don't need to be too accurate but this is
+	// a reasonable value
+	avgDQDX /= static_cast<float>(nHitsUsed);
+	return  300.f / avgDQDX;
+
+}
+
 // Returns a 2D histogram of the raw data in a patch
 TH2D MichelAnalysis::DrawPatchAsHist(
   const std::vector<std::vector<float>> & patch, 
@@ -1204,7 +1462,7 @@ TH2D MichelAnalysis::DrawPatchAsHist(
 
 	size_t patchSizeDrift = patch[0].size();
 
-	TH2D * patchHist = tfs->make<TH2D>((basename + "_raw").c_str(), 
+	TH2D * patchHist = tfs -> make<TH2D>((basename + "_raw").c_str(), 
 	                                   "Raw Data Image", patchSizeWire, 0, 
 	                                   patchSizeWire, patchSizeDrift, 0, 
 	                                   patchSizeDrift);
@@ -1214,7 +1472,7 @@ TH2D MichelAnalysis::DrawPatchAsHist(
 				for (size_t j = 0; j < patch.at(i).size(); ++j) 
 				{ 
 					auto adc = patch[i][j];
-					patchHist->Fill(static_cast<double>(i), static_cast<double>(j), adc);
+					patchHist -> Fill(static_cast<double>(i), static_cast<double>(j), adc);
 				}
 			}
 
@@ -1229,30 +1487,31 @@ TH2D MichelAnalysis::DrawMichelAsRawImage(
        const std::string basename, 
        art::ServiceHandle<art::TFileService> tfs,
        const size_t nWireBins,
-       const MichelAnalysis::DUNEUtils & duneUtils)
+       const MichelAnalysis::DUNEUtils & duneUtils,
+       const std::string wireLabel)
 {
 
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	art::Ptr<recob::Hit>  hit = hits[0];
-	unsigned int plane = hit->WireID().Plane;
+	unsigned int plane = hit -> WireID().Plane;
 	size_t i = 0;
 	while (plane != 2)
 	{
 		i += 1;
 		if (i >= hits.size()) { break; }
 		hit = hits[i];
-		plane = hit->WireID().Plane;
+		plane = hit -> WireID().Plane;
 	}
 
-	const unsigned int wire     = hit->WireID().Wire;
-	plane    = hit->WireID().Plane;
-	const unsigned int tpc      = hit->WireID().TPC;
-	const unsigned int cryostat = hit->WireID().Cryostat;
-	const float        peakTime = hit->PeakTime();
+	const unsigned int wire     = hit -> WireID().Wire;
+	plane    = hit -> WireID().Plane;
+	const unsigned int tpc      = hit -> WireID().TPC;
+	const unsigned int cryostat = hit -> WireID().Cryostat;
+	const float        peakTime = hit -> PeakTime();
 
 	art::Handle<std::vector<recob::Wire>> wireHandle;
-	event.getByLabel("caldata", wireHandle);
+	event.getByLabel(wireLabel, wireHandle);
 
 	std::vector<std::vector<float>> rawData;
 	MichelAnalysis::GetWireDriftData(rawData, * wireHandle, duneUtils, plane,
@@ -1260,10 +1519,10 @@ TH2D MichelAnalysis::DrawMichelAsRawImage(
 
 	std::vector<std::vector<float>> patch;
 
-	double driftVelocity   = duneUtils.detprop->DriftVelocity();
-	double clockFrequency  = duneUtils.detclock->TPCClock().Frequency();
+	double driftVelocity   = duneUtils.detprop -> DriftVelocity();
+	double clockFrequency  = duneUtils.detclock -> TPCClock().Frequency();
 
-	double wireBinSize   = duneUtils.geom->WirePitch(plane);
+	double wireBinSize   = duneUtils.geom -> WirePitch(plane);
 	double timeBinSize   = driftVelocity / clockFrequency;
 
 	double aspectRatio = wireBinSize / timeBinSize;
@@ -1303,20 +1562,20 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	unsigned int centralWire     { 0 };
-	unsigned int centralTick     { 0 };
+	double centralTick           { 0. };
 	unsigned int nCollectionHits { 0 };
 
 	art::Ptr<recob::Hit>  hit;
 	for (auto const & daughterHit : daughterHits)
 	{
 
-		if (daughterHit->WireID().Plane != 2) { continue; }
+		if (daughterHit -> WireID().Plane != 2) { continue; }
 
 		if (hit.isNull()) { hit = daughterHit; }
 
 		nCollectionHits += 1;
-		centralWire     += daughterHit->WireID().Wire;
-		centralTick     += daughterHit->PeakTime();
+		centralWire     += daughterHit -> WireID().Wire;
+		centralTick     += daughterHit -> PeakTime();
 
 	}
 
@@ -1348,13 +1607,13 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	centralWire /= nCollectionHits;
 	centralTick /= nCollectionHits;
 
-	const unsigned int plane    { hit->WireID().Plane };
-	const unsigned int tpc      { hit->WireID().TPC };
-	const unsigned int cryostat { hit->WireID().Cryostat };
+	const unsigned int plane    { hit -> WireID().Plane };
+	const unsigned int tpc      { hit -> WireID().TPC };
+	const unsigned int cryostat { hit -> WireID().Cryostat };
 
-	double driftVelocity  { duneUtils.detprop->DriftVelocity() };
-	double clockFrequency { duneUtils.detclock->TPCClock().Frequency() };
-	double wireBinSize    { duneUtils.geom->WirePitch(plane) };
+	double driftVelocity  { duneUtils.detprop -> DriftVelocity() };
+	double clockFrequency { duneUtils.detclock -> TPCClock().Frequency() };
+	double wireBinSize    { duneUtils.geom -> WirePitch(plane) };
 	double timeBinSize    { driftVelocity / clockFrequency };
 	double aspectRatio    { wireBinSize / timeBinSize };
 	
@@ -1363,25 +1622,25 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	  static_cast<double>(nWireBins) * aspectRatio);
 
 
-	TH2D * dataHist      = tfs->make<TH2D>((basename + "_wire").c_str(), 
+	TH2D * dataHist      = tfs -> make<TH2D>((basename + "_wire").c_str(), 
 	                                     "Wire Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * energyHist    = tfs->make<TH2D>((basename + "_energy").c_str(), 
+	TH2D * energyHist    = tfs -> make<TH2D>((basename + "_energy").c_str(), 
 	                                     "Energy Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnEMHist     = tfs->make<TH2D>((basename + "_cnnem").c_str(), 
+	TH2D * cnnEMHist     = tfs -> make<TH2D>((basename + "_cnnem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnMichelHist = tfs->make<TH2D>((basename + "_cnnmichel").c_str(), 
+	TH2D * cnnMichelHist = tfs -> make<TH2D>((basename + "_cnnmichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluEMHist     = tfs->make<TH2D>((basename + "_cluem").c_str(), 
+	TH2D * cluEMHist     = tfs -> make<TH2D>((basename + "_cluem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluMichelHist = tfs->make<TH2D>((basename + "_clumichel").c_str(), 
+	TH2D * cluMichelHist = tfs -> make<TH2D>((basename + "_clumichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * truthHist     = tfs->make<TH2D>((basename + "_truth").c_str(),
+	TH2D * truthHist     = tfs -> make<TH2D>((basename + "_truth").c_str(),
 	                                     "Truth Image", nWireBins, 0, nWireBins,
 	                                     nWireBins, 0, nTimeBins);
 
@@ -1410,12 +1669,12 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 		for (auto const & hit : pfphits) 
 		{
 
-			if (hit->WireID().Plane != plane)       { continue; }
-			if (hit->WireID().TPC != tpc)           { continue; }
-			if (hit->WireID().Cryostat != cryostat) { continue; }
+			if (hit -> WireID().Plane != plane)       { continue; }
+			if (hit -> WireID().TPC != tpc)           { continue; }
+			if (hit -> WireID().Cryostat != cryostat) { continue; }
 
-			const unsigned int wire = hit->WireID().Wire;
-			const unsigned int time = hit->PeakTime();
+			const unsigned int wire = hit -> WireID().Wire;
+			const unsigned int time = hit -> PeakTime();
 
 			const int wireDiff = static_cast<int> (centralWire) - 
 			                     static_cast<int> (wire);
@@ -1480,20 +1739,20 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	unsigned int centralWire     { 0 };
-	unsigned int centralTick     { 0 };
+	double centralTick           { 0 };
 	unsigned int nCollectionHits { 0 };
 
 	art::Ptr<recob::Hit>  hit;
 	for (auto const & daughterHit : daughterHits)
 	{
 
-		if (daughterHit->WireID().Plane != 2) { continue; }
+		if (daughterHit -> WireID().Plane != 2) { continue; }
 
 		if (hit.isNull()) { hit = daughterHit; }
 
 		nCollectionHits += 1;
-		centralWire     += daughterHit->WireID().Wire;
-		centralTick     += daughterHit->PeakTime();
+		centralWire     += daughterHit -> WireID().Wire;
+		centralTick     += daughterHit -> PeakTime();
 
 	}
 
@@ -1525,13 +1784,13 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	centralWire /= nCollectionHits;
 	centralTick /= nCollectionHits;
 
-	const unsigned int plane    { hit->WireID().Plane };
-	const unsigned int tpc      { hit->WireID().TPC };
-	const unsigned int cryostat { hit->WireID().Cryostat };
+	const unsigned int plane    { hit -> WireID().Plane };
+	const unsigned int tpc      { hit -> WireID().TPC };
+	const unsigned int cryostat { hit -> WireID().Cryostat };
 
-	double driftVelocity  { duneUtils.detprop->DriftVelocity() };
-	double clockFrequency { duneUtils.detclock->TPCClock().Frequency() };
-	double wireBinSize    { duneUtils.geom->WirePitch(plane) };
+	double driftVelocity  { duneUtils.detprop -> DriftVelocity() };
+	double clockFrequency { duneUtils.detclock -> TPCClock().Frequency() };
+	double wireBinSize    { duneUtils.geom -> WirePitch(plane) };
 	double timeBinSize    { driftVelocity / clockFrequency };
 	double aspectRatio    { wireBinSize / timeBinSize };
 	
@@ -1540,25 +1799,25 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	  static_cast<double>(nWireBins) * aspectRatio);
 
 
-	TH2D * dataHist      = tfs->make<TH2D>((basename + "_wire").c_str(), 
+	TH2D * dataHist      = tfs -> make<TH2D>((basename + "_wire").c_str(), 
 	                                     "Wire Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * energyHist    = tfs->make<TH2D>((basename + "_energy").c_str(), 
+	TH2D * energyHist    = tfs -> make<TH2D>((basename + "_energy").c_str(), 
 	                                     "Energy Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnEMHist     = tfs->make<TH2D>((basename + "_cnnem").c_str(), 
+	TH2D * cnnEMHist     = tfs -> make<TH2D>((basename + "_cnnem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnMichelHist = tfs->make<TH2D>((basename + "_cnnmichel").c_str(), 
+	TH2D * cnnMichelHist = tfs -> make<TH2D>((basename + "_cnnmichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluEMHist     = tfs->make<TH2D>((basename + "_cluem").c_str(), 
+	TH2D * cluEMHist     = tfs -> make<TH2D>((basename + "_cluem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluMichelHist = tfs->make<TH2D>((basename + "_clumichel").c_str(), 
+	TH2D * cluMichelHist = tfs -> make<TH2D>((basename + "_clumichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * truthHist     = tfs->make<TH2D>((basename + "_truth").c_str(),
+	TH2D * truthHist     = tfs -> make<TH2D>((basename + "_truth").c_str(),
 	                                     "Truth Image", nWireBins, 0, nWireBins,
 	                                     nWireBins, 0, nTimeBins);
 
@@ -1586,12 +1845,12 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 		for (auto const & hit : clusterHits) 
 		{
 
-			if (hit->WireID().Plane != plane)       { continue; }
-			if (hit->WireID().TPC != tpc)           { continue; }
-			if (hit->WireID().Cryostat != cryostat) { continue; }
+			if (hit -> WireID().Plane != plane)       { continue; }
+			if (hit -> WireID().TPC != tpc)           { continue; }
+			if (hit -> WireID().Cryostat != cryostat) { continue; }
 
-			const unsigned int wire = hit->WireID().Wire;
-			const unsigned int time = hit->PeakTime();
+			const unsigned int wire = hit -> WireID().Wire;
+			const unsigned int time = hit -> PeakTime();
 
 			const int wireDiff = static_cast<int> (centralWire) - 
 			                     static_cast<int> (wire);
@@ -1656,20 +1915,20 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	unsigned int centralWire     { 0 };
-	unsigned int centralTick     { 0 };
+	double centralTick           { 0. };
 	unsigned int nCollectionHits { 0 };
 
 	art::Ptr<recob::Hit>  hit;
 	for (auto const & daughterHit : daughterHits)
 	{
 
-		if (daughterHit->WireID().Plane != 2) { continue; }
+		if (daughterHit -> WireID().Plane != 2) { continue; }
 
 		if (hit.isNull()) { hit = daughterHit; }
 
 		nCollectionHits += 1;
-		centralWire     += daughterHit->WireID().Wire;
-		centralTick     += daughterHit->PeakTime();
+		centralWire     += daughterHit -> WireID().Wire;
+		centralTick     += daughterHit -> PeakTime();
 
 	}
 
@@ -1697,13 +1956,13 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	centralWire /= nCollectionHits;
 	centralTick /= nCollectionHits;
 
-	const unsigned int plane    { hit->WireID().Plane };
-	const unsigned int tpc      { hit->WireID().TPC };
-	const unsigned int cryostat { hit->WireID().Cryostat };
+	const unsigned int plane    { hit -> WireID().Plane };
+	const unsigned int tpc      { hit -> WireID().TPC };
+	const unsigned int cryostat { hit -> WireID().Cryostat };
 
-	double driftVelocity  { duneUtils.detprop->DriftVelocity() };
-	double clockFrequency { duneUtils.detclock->TPCClock().Frequency() };
-	double wireBinSize    { duneUtils.geom->WirePitch(plane) };
+	double driftVelocity  { duneUtils.detprop -> DriftVelocity() };
+	double clockFrequency { duneUtils.detclock -> TPCClock().Frequency() };
+	double wireBinSize    { duneUtils.geom -> WirePitch(plane) };
 	double timeBinSize    { driftVelocity / clockFrequency };
 	double aspectRatio    { wireBinSize / timeBinSize };
 	
@@ -1712,31 +1971,31 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	  static_cast<double>(nWireBins) * aspectRatio);
 
 
-	TH2D * dataHist      = tfs->make<TH2D>((basename + "_wire").c_str(), 
+	TH2D * dataHist      = tfs -> make<TH2D>((basename + "_wire").c_str(), 
 	                                     "Wire Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * energyHist    = tfs->make<TH2D>((basename + "_energy").c_str(), 
+	TH2D * energyHist    = tfs -> make<TH2D>((basename + "_energy").c_str(), 
 	                                     "Energy Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnEMHist     = tfs->make<TH2D>((basename + "_cnnem").c_str(), 
+	TH2D * cnnEMHist     = tfs -> make<TH2D>((basename + "_cnnem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnMichelHist = tfs->make<TH2D>((basename + "_cnnmichel").c_str(), 
+	TH2D * cnnMichelHist = tfs -> make<TH2D>((basename + "_cnnmichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * truthHist     = tfs->make<TH2D>((basename + "_truth").c_str(),
+	TH2D * truthHist     = tfs -> make<TH2D>((basename + "_truth").c_str(),
 	                                     "Truth Image", nWireBins, 0, nWireBins,
 	                                     nWireBins, 0, nTimeBins);
 
 	for (auto const & hit : allHits)
 	{
 
-		if (hit->WireID().Plane != plane)       { continue; }
-		if (hit->WireID().TPC != tpc)           { continue; }
-		if (hit->WireID().Cryostat != cryostat) { continue; }
+		if (hit -> WireID().Plane != plane)       { continue; }
+		if (hit -> WireID().TPC != tpc)           { continue; }
+		if (hit -> WireID().Cryostat != cryostat) { continue; }
 
-		const unsigned int wire = hit->WireID().Wire;
-		const unsigned int time = hit->PeakTime();
+		const unsigned int wire = hit -> WireID().Wire;
+		const unsigned int time = hit -> PeakTime();
 
 		const int wireDiff = static_cast<int> (centralWire) - 
 		                     static_cast<int> (wire);
@@ -1775,7 +2034,7 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 
 }
 
-std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
+void MichelAnalysis::DrawMichelTrainingData(
        const vec_ptr_hit_t & daughterHits,
        const vec_ptr_hit_t & allHits,
        const vec_pfp_t & pfparticles,
@@ -1796,77 +2055,93 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	unsigned int centralWire     { 0 };
-	unsigned int centralTick     { 0 };
+	double centralTick           { 0. };
 	unsigned int nCollectionHits { 0 };
 
 	art::Ptr<recob::Hit>  hit;
 	for (auto const & daughterHit : daughterHits)
 	{
-		if (daughterHit->WireID().Plane != 2) { continue; }
-		if (hit.isNull())                     { hit = daughterHit; }
+		if (daughterHit -> WireID().Plane != 2) { continue; }
+		if (hit.isNull())                       { hit = daughterHit; }
 
 		nCollectionHits += 1;
-		centralWire     += daughterHit->WireID().Wire;
-		centralTick     += daughterHit->PeakTime();
+		centralWire     += daughterHit -> WireID().Wire;
+		centralTick     += daughterHit -> PeakTime() - t0 - 
+		                     duneUtils.detprop -> TriggerOffset(); 
 	}
 
 	if (nCollectionHits < 1) 
 	{ 
-		std::cout << "No collection plane hits\n";
-		std::vector<TH2D> trainingData;
-		return trainingData;
+		std::cout << "No collection plane hits\n"; 
+		return;
 	}
 
 	centralWire /= nCollectionHits;
 	centralTick /= nCollectionHits;
 
-	const unsigned int plane    { hit->WireID().Plane };
-	const unsigned int tpc      { hit->WireID().TPC };
-	const unsigned int cryostat { hit->WireID().Cryostat };
+	const unsigned int plane    { hit -> WireID().Plane };
+	const unsigned int tpc      { hit -> WireID().TPC };
+	const unsigned int cryostat { hit -> WireID().Cryostat };
 
-	double driftVelocity  { duneUtils.detprop->DriftVelocity() };
-	double clockFrequency { duneUtils.detclock->TPCClock().Frequency() };
-	double wireBinSize    { duneUtils.geom->WirePitch(plane) };
+	double driftVelocity  { duneUtils.detprop -> DriftVelocity() };
+	double clockFrequency { duneUtils.detclock -> TPCClock().Frequency() };
+	double wireBinSize    { duneUtils.geom -> WirePitch(plane) };
 	double timeBinSize    { driftVelocity / clockFrequency };
-
 	double aspectRatio    { wireBinSize / timeBinSize };
+
 	const size_t nTimeBins = static_cast<size_t>(
 	  static_cast<double>(nWireBins) * aspectRatio);
 
-	TH2D * dataHist       = tfs->make<TH2D>((basename + "_wire").c_str(), 
-	                                        "Wire Time Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * energyHist     = tfs->make<TH2D>((basename + "_energy").c_str(), 
-	                                        "Energy Time Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnEMHist      = tfs->make<TH2D>((basename + "_cnnem").c_str(), 
-	                                        "EM Score Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnMichelHist  = tfs->make<TH2D>((basename + "_cnnmichel").c_str(), 
-	                                        "Michel Score Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluEMHist      = tfs->make<TH2D>((basename + "_cluem").c_str(), 
-	                                       "EM Score Image", nWireBins, 0, 
-	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluMichelHist  = tfs->make<TH2D>((basename + "_clumichel").c_str(), 
-	                                        "Michel Score Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * trueEnergyHist = tfs->make<TH2D>((basename + "_trueEnergy").c_str(),
-	                                        "True Energy Deposits", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * truthHist      = tfs->make<TH2D>((basename + "_truth").c_str(),
-	                                        "Truth Image", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * nTrueHist      = tfs->make<TH2D>((basename + "_nTrue").c_str(),
-	                                        "NumberOfTrueHits", nWireBins, 0, 
-	                                        nWireBins, nWireBins, 0, nTimeBins);
+	TH2D * dataHist        = tfs -> make<TH2D>((basename + "_wire").c_str(), "Wire Time Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * normHist        = tfs -> make<TH2D>((basename + "_norm").c_str(), "Norm Wire Time Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * energyHist      = tfs -> make<TH2D>((basename + "_energy").c_str(), "Energy Time Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * cnnEMHist       = tfs -> make<TH2D>((basename + "_cnnem").c_str(), "EM Score Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * cnnMichelHist   = tfs -> make<TH2D>((basename + "_cnnmichel").c_str(), "Michel Score Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * cluEMHist       = tfs -> make<TH2D>((basename + "_cluem").c_str(), "EM Score Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * cluMichelHist   = tfs -> make<TH2D>((basename + "_clumichel").c_str(), "Michel Score Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * trueEnergyHist  = tfs -> make<TH2D>((basename + "_trueEnergy").c_str(), "True Energy Dep", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * truthHist       = tfs -> make<TH2D>((basename + "_truth").c_str(), "Truth Image", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * nTrueHist       = tfs -> make<TH2D>((basename + "_nTrue").c_str(), "NumberOfTrueHits", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * totIonQHist     = tfs -> make<TH2D>((basename + "_totIonQ").c_str(), "Total Ionisation Q", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * totIonEHist     = tfs -> make<TH2D>((basename + "_totIonE").c_str(), "Total Reco Ion E", 
+	                                           nWireBins, 0, nWireBins, 
+	                                           nWireBins, 0, nTimeBins);
+	TH2D * totTrueIonEHist = tfs -> make<TH2D>((basename + "_totTrueIonE").c_str(), "Tot True Ion E", 
+	                                          nWireBins, 0, nWireBins, 
+	                                          nWireBins, 0, nTimeBins);
+
 
 	// Keep track of used hits to not double fill later
 	// - We want to use clusters to get more consistent cnn scores
 	// - We don't quite get all hits with clusters so need to keep track
 	//   for when we get the last hits later
 	std::unordered_set<size_t> usedHitKeys;
-	int nTrueHits {0};
+	int    nTrueHits     { 0 };
+	double totalIonQ     { 0. };
+	double totalIonE     { 0. };
+	double totalTrueIonE { 0. };
 	for (auto const & pfparticle : pfparticles)
 	{
 
@@ -1874,13 +2149,13 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 		  MichelAnalysis::GetPFParticleHits(pfparticle, event, pdUtils, 
 		                                    particleLabel);
 
-		double cluScoreEM     = 0.;
-		double cluScoreMichel = 0.;
+		double cluScoreEM     { 0. };
+		double cluScoreMichel { 0. };
 		for (auto const & hit : pfphits) 
 		{
 			usedHitKeys.insert(hit.key());
-			HitData hitData = GetHitData(hit, t0, caloAlg, duneUtils,
-			                                     hitcnnscores);
+			// I only need the CNN scores here so no need to use full hitdata function
+			HitData hitData = GetHitData(hit, hitcnnscores);
 			cluScoreEM     += hitData.CNNScore_EM;
 			cluScoreMichel += hitData.CNNScore_Michel;
 		}
@@ -1891,21 +2166,55 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 			cluScoreMichel /= pfphits.size();
 		}
 
-		for (auto const & hit : pfphits) 
+		// We need each tracks reconstructed at the proper time for it
+		std::vector<anab::T0> t0s = pdUtils.pfputil.GetPFParticleT0(pfparticle, 
+		                                                            event, 
+		                                                            particleLabel);
+
+		art::FindManyP<recob::SpacePoint> spFromPFPHits(pfphits, event, "pandora");
+
+		for (size_t iHit = 0; iHit < pfphits.size(); iHit++) 
 		{
 
-			if (hit->WireID().Plane    != plane)    { continue; }
-			if (hit->WireID().TPC      != tpc)      { continue; }
-			if (hit->WireID().Cryostat != cryostat) { continue; }
+			if (pfphits[iHit] -> WireID().Plane    != plane)    { continue; }
+			if (pfphits[iHit] -> WireID().TPC      != tpc)      { continue; }
+			if (pfphits[iHit] -> WireID().Cryostat != cryostat) { continue; }
 
-			const simb::MCParticle * mcp = HitToMCP(hit, duneUtils);
+			const unsigned int wire { pfphits[iHit] -> WireID().Wire };
+			double             time { pfphits[iHit] -> PeakTime() };
+			HitData hitData;
+			if (t0s.size() > 0) 
+			{ 
+				double t0Ticks = t0s[0].Time() / duneUtils.detprop -> SamplingRate();
+				time -= t0;
+				hitData = GetHitData(pfphits[iHit], t0Ticks, caloAlg, duneUtils, event, 
+				                     spFromPFPHits.at(iHit), hitcnnscores);
+			}
+			else                
+			{ 
+				double t0Ticks = t0 / duneUtils.detprop -> SamplingRate();
+				time -= t0;
+				hitData = GetHitData(pfphits[iHit], t0Ticks, caloAlg, duneUtils, event, 
+				                     spFromPFPHits.at(iHit), hitcnnscores);
+			}
+			time -= duneUtils.detprop -> TriggerOffset();
+
+			hitData.CLUScore_EM     = cluScoreEM;
+			hitData.CLUScore_Michel = cluScoreMichel;
+
+			const double trueEnergy = HitToTrueEnergy(hit, duneUtils);
+
+			const simb::MCParticle * mcp = HitToMCP(pfphits[iHit], duneUtils);
 			if (mcp != nullptr) 
 			{
-				if (mcp -> TrackId() == mcParticle.TrackId()) { nTrueHits++; }
+				if (mcp -> TrackId() == mcParticle.TrackId()) 
+				{ 
+					nTrueHits++; 
+					totalIonQ     += hitData.Integral * norm;
+					totalIonE     += hitData.Energy;
+					totalTrueIonE += trueEnergy;
+				}
 			}
-
-			const unsigned int wire = hit->WireID().Wire;
-			const unsigned int time = hit->PeakTime();
 
 			const int wireDiff = static_cast<int> (centralWire) - 
 			                     static_cast<int> (wire);
@@ -1921,17 +2230,11 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 			const int wireBin = (static_cast<int>(nWireBins) / 2) - wireDiff;
 			const int timeBin = (static_cast<int>(nTimeBins) / 2) - timeDiff;
 
-			HitData hitData = GetHitData(hit, t0, caloAlg, duneUtils,
-			                             hitcnnscores);
+			const bool hitIsMichel  = HitIsMichel(pfphits[iHit], duneUtils);
 
-			hitData.CLUScore_EM     = cluScoreEM;
-			hitData.CLUScore_Michel = cluScoreMichel;
-
-			const double trueEnergy = HitToTrueEnergy(hit, duneUtils);
-			const bool hitIsMichel  = HitIsMichel(hit, duneUtils);
-
-			dataHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
-			energyHist     -> Fill(wireBin, timeBin, hitData.Energy * norm);
+			dataHist       -> Fill(wireBin, timeBin, hitData.Integral);
+			normHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
+			energyHist     -> Fill(wireBin, timeBin, hitData.Energy);
 			cnnEMHist      -> Fill(wireBin, timeBin, hitData.CNNScore_EM);
 			cnnMichelHist  -> Fill(wireBin, timeBin, hitData.CNNScore_Michel);
 			cluEMHist      -> Fill(wireBin, timeBin, hitData.CLUScore_EM);
@@ -1951,25 +2254,40 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 
 	}
 
-	for (auto const & hit : allHits)
+	art::FindManyP<recob::SpacePoint> spFromAllHits(allHits, event, "pandora");
+
+	for (size_t iHit = 0; iHit < allHits.size(); iHit++) 
 	{
 
 		std::unordered_set<size_t>::const_iterator getHit = 
-		  usedHitKeys.find(hit.key());
+		  usedHitKeys.find(allHits[iHit].key());
 
-		if (getHit != usedHitKeys.end())        { continue; }
-		if (hit->WireID().Plane != plane)       { continue; }
-		if (hit->WireID().TPC != tpc)           { continue; }
-		if (hit->WireID().Cryostat != cryostat) { continue; }
+		if (getHit != usedHitKeys.end())          { continue; }
+		if (allHits[iHit] -> WireID().Plane != plane)       { continue; }
+		if (allHits[iHit] -> WireID().TPC != tpc)           { continue; }
+		if (allHits[iHit] -> WireID().Cryostat != cryostat) { continue; }
 
-		const simb::MCParticle * mcp = HitToMCP(hit, duneUtils);
+		const unsigned int wire = allHits[iHit] -> WireID().Wire;
+		const double       time { allHits[iHit] -> PeakTime() - t0 - 
+		                          duneUtils.detprop -> TriggerOffset() };
+
+		double t0Ticks = t0 / duneUtils.detprop -> SamplingRate();
+		HitData hitData = GetHitData(allHits[iHit], t0Ticks, caloAlg, duneUtils, 
+		                             event, spFromAllHits.at(iHit), hitcnnscores);
+
+		const double trueEnergy = HitToTrueEnergy(allHits[iHit], duneUtils);
+
+		const simb::MCParticle * mcp = HitToMCP(allHits[iHit], duneUtils);
 		if (mcp != nullptr) 
 		{
-			if (mcp -> TrackId() == mcParticle.TrackId()) { nTrueHits++; }
+			if (mcp -> TrackId() == mcParticle.TrackId()) 
+			{ 
+				nTrueHits++; 
+				totalIonQ     += hitData.Integral * norm;
+				totalIonE     += hitData.Energy * norm;
+				totalTrueIonE += trueEnergy;
+			}
 		}
-
-		const unsigned int wire = hit -> WireID().Wire;
-		const unsigned int time = hit -> PeakTime();
 
 		const int wireDiff = static_cast<int> (centralWire) - 
 		                     static_cast<int> (wire);
@@ -1985,13 +2303,10 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 		const int wireBin = (static_cast<int>(nWireBins) / 2) - wireDiff;
 		const int timeBin = (static_cast<int>(nTimeBins) / 2) - timeDiff;
 
-		HitData hitData = GetHitData(hit, t0, caloAlg, duneUtils,
-		                             hitcnnscores);
+		const bool hitIsMichel  = HitIsMichel(allHits[iHit], duneUtils);
 
-		const double trueEnergy = HitToTrueEnergy(hit, duneUtils);
-		const bool hitIsMichel  = HitIsMichel(hit, duneUtils);
-
-		dataHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
+		dataHist       -> Fill(wireBin, timeBin, hitData.Integral);
+		normHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
 		energyHist     -> Fill(wireBin, timeBin, hitData.Energy * norm);
 		cnnEMHist      -> Fill(wireBin, timeBin, hitData.CNNScore_EM);
 		cnnMichelHist  -> Fill(wireBin, timeBin, hitData.CNNScore_Michel);
@@ -2013,21 +2328,11 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData(
 
 	for (size_t i = 0; i < (nWireBins + 2)*(nTimeBins + 2); i++)
 	{
-		nTrueHist -> SetBinContent(i, nTrueHits);
+		nTrueHist       -> SetBinContent(i, nTrueHits);
+		totIonQHist     -> SetBinContent(i, totalIonQ);
+		totIonEHist     -> SetBinContent(i, totalIonE);
+		totTrueIonEHist -> SetBinContent(i, totalTrueIonE);
 	}
-
-	std::vector<TH2D> trainingData;
-	trainingData.push_back(* dataHist);
-	trainingData.push_back(* energyHist);
-	trainingData.push_back(* cnnEMHist);
-	trainingData.push_back(* cnnMichelHist);
-	trainingData.push_back(* cluEMHist);
-	trainingData.push_back(* cluMichelHist);
-	trainingData.push_back(* trueEnergyHist);
-	trainingData.push_back(* truthHist);
-	trainingData.push_back(* nTrueHist);
-
-	return trainingData;
 
 }
 
@@ -2051,80 +2356,64 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 	// Get details of one of the hits and use it as the centre of the image
 	// try to use plane 2 if possible since that is the collection view
 	unsigned int centralWire     { 0 };
-	unsigned int centralTick     { 0 };
+	double centralTick           { 0. };
 	unsigned int nCollectionHits { 0 };
 
 	art::Ptr<recob::Hit>  hit;
 	for (auto const & daughterHit : daughterHits)
 	{
-
-		if (daughterHit->WireID().Plane != 2) { continue; }
-
-		if (hit.isNull()) { hit = daughterHit; }
+		if (daughterHit -> WireID().Plane != 2) { continue; }
+		if (hit.isNull())                       { hit = daughterHit; }
 
 		nCollectionHits += 1;
-		centralWire     += daughterHit->WireID().Wire;
-		centralTick     += daughterHit->PeakTime();
-
+		centralWire     += daughterHit -> WireID().Wire;
+		centralTick     += daughterHit -> PeakTime() - t0 - 
+		                     duneUtils.detprop -> TriggerOffset(); 
 	}
 
 	if (nCollectionHits < 1) 
 	{ 
 		std::cout << "No collection plane hits\n";
 		std::vector<TH2D> trainingData;
-
-		TH2D dataHist       = TH2D();
-		TH2D energyHist     = TH2D();
-		TH2D cnnEMHist      = TH2D();
-		TH2D cnnMichelHist  = TH2D();
-		TH2D cluEMHist      = TH2D();
-		TH2D cluMichelHist  = TH2D();
-
-		trainingData.push_back(dataHist);
-		trainingData.push_back(energyHist);
-		trainingData.push_back(cnnEMHist);
-		trainingData.push_back(cnnMichelHist);
-		trainingData.push_back(cluEMHist);
-		trainingData.push_back(cluMichelHist);
-
 		return trainingData;
-
 	}
 
 	centralWire /= nCollectionHits;
 	centralTick /= nCollectionHits;
 
-	const unsigned int plane    { hit->WireID().Plane };
-	const unsigned int tpc      { hit->WireID().TPC };
-	const unsigned int cryostat { hit->WireID().Cryostat };
+	const unsigned int plane    { hit -> WireID().Plane };
+	const unsigned int tpc      { hit -> WireID().TPC };
+	const unsigned int cryostat { hit -> WireID().Cryostat };
 
-	double driftVelocity  { duneUtils.detprop->DriftVelocity() };
-	double clockFrequency { duneUtils.detclock->TPCClock().Frequency() };
-	double wireBinSize    { duneUtils.geom->WirePitch(plane) };
+	double driftVelocity  { duneUtils.detprop -> DriftVelocity() };
+	double clockFrequency { duneUtils.detclock -> TPCClock().Frequency() };
+	double wireBinSize    { duneUtils.geom -> WirePitch(plane) };
 	double timeBinSize    { driftVelocity / clockFrequency };
 	double aspectRatio    { wireBinSize / timeBinSize };
 	
-	// TODO: read the nBins from the fhicl file
 	const size_t nTimeBins = static_cast<size_t>(
 	  static_cast<double>(nWireBins) * aspectRatio);
 
-
-	TH2D * dataHist      = tfs->make<TH2D>((basename + "_wire").c_str(), 
+	TH2D * dataHist      = tfs -> make<TH2D>((basename + "_wire").c_str(), 
 	                                     "Wire Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * energyHist    = tfs->make<TH2D>((basename + "_energy").c_str(), 
+	TH2D * normHist      = tfs -> make<TH2D>((basename + "_norm").c_str(), 
+	                                     "Normalised Wire Time Image", 
+	                                     nWireBins, 0, nWireBins, nWireBins, 0, 
+	                                     nTimeBins);
+	TH2D * energyHist    = tfs -> make<TH2D>((basename + "_energy").c_str(), 
 	                                     "Energy Time Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnEMHist     = tfs->make<TH2D>((basename + "_cnnem").c_str(), 
+	TH2D * cnnEMHist     = tfs -> make<TH2D>((basename + "_cnnem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cnnMichelHist = tfs->make<TH2D>((basename + "_cnnmichel").c_str(), 
+	TH2D * cnnMichelHist = tfs -> make<TH2D>((basename + "_cnnmichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluEMHist     = tfs->make<TH2D>((basename + "_cluem").c_str(), 
+	TH2D * cluEMHist     = tfs -> make<TH2D>((basename + "_cluem").c_str(), 
 	                                       "EM Score Image", nWireBins, 0, 
 	                                       nWireBins, nWireBins, 0, nTimeBins);
-	TH2D * cluMichelHist = tfs->make<TH2D>((basename + "_clumichel").c_str(), 
+	TH2D * cluMichelHist = tfs -> make<TH2D>((basename + "_clumichel").c_str(), 
 	                                     "Michel Score Image", nWireBins, 0, 
 	                                     nWireBins, nWireBins, 0, nTimeBins);
 
@@ -2140,12 +2429,13 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 		  MichelAnalysis::GetPFParticleHits(pfparticle, event, pdUtils, 
 		                                    particleLabel);
 
-		double cluScoreEM     = 0.;
-		double cluScoreMichel = 0.;
+		double cluScoreEM     { 0. };
+		double cluScoreMichel { 0. };
 		for (auto const & hit : pfphits) 
 		{
 			usedHitKeys.insert(hit.key());
-			HitData hitData = GetHitData(hit, t0, caloAlg, duneUtils, hitcnnscores);
+			// I only need the CNN scores here so no need to use full hitdata function
+			HitData hitData = GetHitData(hit, hitcnnscores);
 			cluScoreEM     += hitData.CNNScore_EM;
 			cluScoreMichel += hitData.CNNScore_Michel;
 		}
@@ -2156,15 +2446,41 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 			cluScoreMichel /= pfphits.size();
 		}
 
-		for (auto const & hit : pfphits) 
+		// We need each tracks reconstructed at the proper time for it
+		std::vector<anab::T0> t0s = pdUtils.pfputil.GetPFParticleT0(pfparticle, 
+		                                                            event, 
+		                                                            particleLabel);
+
+		art::FindManyP<recob::SpacePoint> spFromPFPHits(pfphits, event, "pandora");
+
+		for (size_t iHit = 0; iHit < pfphits.size(); iHit++) 
 		{
 
-			if (hit->WireID().Plane != plane)       { continue; }
-			if (hit->WireID().TPC != tpc)           { continue; }
-			if (hit->WireID().Cryostat != cryostat) { continue; }
+			if (pfphits[iHit] -> WireID().Plane != plane)       { continue; }
+			if (pfphits[iHit] -> WireID().TPC != tpc)           { continue; }
+			if (pfphits[iHit] -> WireID().Cryostat != cryostat) { continue; }
 
-			const unsigned int wire = hit->WireID().Wire;
-			const unsigned int time = hit->PeakTime();
+			const unsigned int wire { pfphits[iHit] -> WireID().Wire };
+			double             time { pfphits[iHit] -> PeakTime() };
+			HitData hitData;
+			if (t0s.size() > 0) 
+			{ 
+				double t0Ticks = t0s[0].Time() / duneUtils.detprop -> SamplingRate();
+				time -= t0s[0].Time(); 
+				hitData = GetHitData(pfphits[iHit], t0Ticks, caloAlg, duneUtils, event, 
+				                     spFromPFPHits.at(iHit), hitcnnscores);
+			}
+			else                
+			{ 
+				double t0Ticks = t0 / duneUtils.detprop -> SamplingRate();
+				time -= t0; 
+				hitData = GetHitData(pfphits[iHit], t0Ticks, caloAlg, duneUtils, event, 
+				                     spFromPFPHits.at(iHit), hitcnnscores);
+			}
+			time -= duneUtils.detprop -> TriggerOffset();
+
+			hitData.CLUScore_EM     = cluScoreEM;
+			hitData.CLUScore_Michel = cluScoreMichel;
 
 			const int wireDiff = static_cast<int> (centralWire) - 
 			                     static_cast<int> (wire);
@@ -2180,12 +2496,9 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 			const int wireBin = (static_cast<int>(nWireBins) / 2) - wireDiff;
 			const int timeBin = (static_cast<int>(nTimeBins) / 2) - timeDiff;
 
-			HitData hitData         = GetHitData(hit, t0, caloAlg, duneUtils, hitcnnscores);
-			hitData.CLUScore_EM     = cluScoreEM;
-			hitData.CLUScore_Michel = cluScoreMichel;
-
-			dataHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
-			energyHist     -> Fill(wireBin, timeBin, hitData.Energy * norm);
+			dataHist       -> Fill(wireBin, timeBin, hitData.Integral);
+			normHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
+			energyHist     -> Fill(wireBin, timeBin, hitData.Energy);
 			cnnEMHist      -> Fill(wireBin, timeBin, hitData.CNNScore_EM);
 			cnnMichelHist  -> Fill(wireBin, timeBin, hitData.CNNScore_Michel);
 			cluEMHist      -> Fill(wireBin, timeBin, hitData.CLUScore_EM);
@@ -2195,19 +2508,26 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 
 	}
 
-	for (auto const & hit : allHits)
+	art::FindManyP<recob::SpacePoint> spFromAllHits(allHits, event, "pandora");
+
+	for (size_t iHit = 0; iHit < allHits.size(); iHit++) 
 	{
 
 		std::unordered_set<size_t>::const_iterator getHit = 
-		  usedHitKeys.find(hit.key());
+		  usedHitKeys.find(allHits[iHit].key());
 
 		if (getHit != usedHitKeys.end())        { continue; }
-		if (hit->WireID().Plane != plane)       { continue; }
-		if (hit->WireID().TPC != tpc)           { continue; }
-		if (hit->WireID().Cryostat != cryostat) { continue; }
+		if (allHits[iHit] -> WireID().Plane != plane)       { continue; }
+		if (allHits[iHit] -> WireID().TPC != tpc)           { continue; }
+		if (allHits[iHit] -> WireID().Cryostat != cryostat) { continue; }
 
-		const unsigned int wire = hit -> WireID().Wire;
-		const unsigned int time = hit -> PeakTime();
+		const unsigned int wire = allHits[iHit] -> WireID().Wire;
+		const double       time { allHits[iHit] -> PeakTime() - t0 - 
+		                          duneUtils.detprop -> TriggerOffset() };
+
+		double t0Ticks = t0 / duneUtils.detprop -> SamplingRate();
+		HitData hitData = GetHitData(allHits[iHit], t0Ticks, caloAlg, duneUtils, 
+		                             event, spFromAllHits.at(iHit), hitcnnscores);
 
 		const int wireDiff = static_cast<int> (centralWire) - 
 		                     static_cast<int> (wire);
@@ -2223,10 +2543,9 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 		const int wireBin = (static_cast<int>(nWireBins) / 2) - wireDiff;
 		const int timeBin = (static_cast<int>(nTimeBins) / 2) - timeDiff;
 
-		HitData hitData = GetHitData(hit, t0, caloAlg, duneUtils, hitcnnscores);
-
-		dataHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
-		energyHist     -> Fill(wireBin, timeBin, hitData.Energy * norm);
+		dataHist       -> Fill(wireBin, timeBin, hitData.Integral);
+		normHist       -> Fill(wireBin, timeBin, hitData.Integral * norm);
+		energyHist     -> Fill(wireBin, timeBin, hitData.Energy);
 		cnnEMHist      -> Fill(wireBin, timeBin, hitData.CNNScore_EM);
 		cnnMichelHist  -> Fill(wireBin, timeBin, hitData.CNNScore_Michel);
 		cluEMHist      -> Fill(wireBin, timeBin, hitData.CNNScore_EM);
@@ -2236,6 +2555,7 @@ std::vector<TH2D> MichelAnalysis::DrawMichelTrainingData_Data(
 
 	std::vector<TH2D> trainingData;
 	trainingData.push_back(* dataHist);
+	trainingData.push_back(* normHist);
 	trainingData.push_back(* energyHist);
 	trainingData.push_back(* cnnEMHist);
 	trainingData.push_back(* cnnMichelHist);
